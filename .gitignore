@@ -1,0 +1,6 @@
+node_modules
+.nx
+dist
+.env
+uploads
+apps/api/storage

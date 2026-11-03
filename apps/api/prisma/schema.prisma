@@ -1,0 +1,343 @@
+// LearnHub schema. Follows LLD 1 of the HLD/LLD (v3): 14 tables.
+// Derived values (topic open, quiz state, watch percent, course progress, assignment state,
+// alerts, dashboard counts) are NOT stored. They are worked out from these rows.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mysql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  STUDENT
+  INSTRUCTOR
+  ADMIN
+}
+
+enum UserStatus {
+  ACTIVE
+  INACTIVE
+}
+
+enum CourseStatus {
+  DRAFT
+  PENDING_REVIEW
+  PUBLISHED
+  REJECTED
+}
+
+// Fixed lists (HLD 6, "Categories and levels").
+enum Category {
+  DESIGN
+  DEVELOPMENT
+  DATA_SCIENCE
+  MARKETING
+}
+
+enum Level {
+  BEGINNER
+  INTERMEDIATE
+  ADVANCED
+}
+
+enum EnrollmentSource {
+  SELF
+  ASSIGNED
+}
+
+enum AttemptStatus {
+  SUBMITTED
+  RELEASED
+  SUPERSEDED
+}
+
+enum SubmissionStatus {
+  SUBMITTED
+  GRADED
+}
+
+enum ActivityType {
+  APPROVAL
+  USERS
+  SETTINGS
+}
+
+// 1. users: one table for all roles. Never hard-deleted; accounts are set INACTIVE.
+model User {
+  id                 Int        @id @default(autoincrement())
+  name               String
+  email              String     @unique
+  mobile             String
+  role               Role
+  status             UserStatus @default(ACTIVE)
+  passwordHash       String
+  mustChangePassword Boolean    @default(false)
+  // Raised on password change and admin reset so old cookies stop working (HLD 7).
+  tokenVersion       Int        @default(0)
+  createdAt          DateTime   @default(now())
+  updatedAt          DateTime   @updatedAt
+
+  taught         Course[]               @relation("CourseInstructor")
+  enrollments    Enrollment[]
+  progress       LessonProgress[]
+  attempts       QuizAttempt[]          @relation("AttemptStudent")
+  releasedMarks  QuizAttempt[]          @relation("AttemptReleasedBy")
+  submissions    Submission[]
+  certificates   Certificate[]
+  resetRequests  PasswordResetRequest[] @relation("ResetUser")
+  resolvedResets PasswordResetRequest[] @relation("ResetResolvedBy")
+  activities     ActivityLog[]
+
+  @@index([role, status])
+}
+
+// 2. courses
+model Course {
+  id           Int          @id @default(autoincrement())
+  title        String
+  description  String       @db.Text
+  category     Category
+  level        Level
+  instructorId Int
+  status       CourseStatus @default(DRAFT)
+  // Cleared when the instructor resubmits.
+  rejectReason String?      @db.Text
+  createdAt    DateTime     @default(now())
+  updatedAt    DateTime     @updatedAt
+
+  instructor   User          @relation("CourseInstructor", fields: [instructorId], references: [id])
+  lessons      Lesson[]
+  assignment   Assignment?
+  enrollments  Enrollment[]
+  certificates Certificate[]
+
+  @@index([status])
+  @@index([instructorId])
+}
+
+// 3. lessons: reorder and delete run in one transaction that renumbers positions
+//    (temporary positions first, so the unique rule never clashes).
+model Lesson {
+  id           Int      @id @default(autoincrement())
+  courseId     Int
+  position     Int
+  title        String
+  videoUrl     String
+  durationMin  Int
+  // One optional PDF material per lesson. Stored through lib/storage.
+  materialPath String?
+  materialName String?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  course   Course           @relation(fields: [courseId], references: [id], onDelete: Cascade)
+  quiz     Quiz?
+  progress LessonProgress[]
+
+  @@unique([courseId, position])
+}
+
+// 4. quizzes: one per lesson. Count and pass mark are copied from settings at creation.
+model Quiz {
+  id            Int      @id @default(autoincrement())
+  lessonId      Int      @unique
+  title         String
+  questionCount Int
+  passMark      Int
+  version       Int      @default(1)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  lesson    Lesson         @relation(fields: [lessonId], references: [id], onDelete: Cascade)
+  questions QuizQuestion[]
+  attempts  QuizAttempt[]
+}
+
+// 5. quiz_questions: exactly questionCount rows per version. Old versions are kept.
+model QuizQuestion {
+  id           Int      @id @default(autoincrement())
+  quizId       Int
+  version      Int
+  position     Int
+  text         String   @db.Text
+  // Four strings.
+  options      Json
+  // 0 to 3.
+  correctIndex Int
+  createdAt    DateTime @default(now())
+
+  quiz Quiz @relation(fields: [quizId], references: [id], onDelete: Cascade)
+
+  @@unique([quizId, version, position])
+}
+
+// 6. quiz_attempts: score and passed stay empty until the instructor releases marks.
+//    A retake adds a new attempt; the latest on the current version counts.
+model QuizAttempt {
+  id           Int           @id @default(autoincrement())
+  quizId       Int
+  quizVersion  Int
+  attemptNo    Int
+  studentId    Int
+  // Chosen option indexes, null where left blank.
+  answers      Json
+  status       AttemptStatus @default(SUBMITTED)
+  score        Int?
+  passed       Boolean?
+  submittedAt  DateTime      @default(now())
+  releasedAt   DateTime?
+  releasedById Int?
+  createdAt    DateTime      @default(now())
+
+  quiz       Quiz  @relation(fields: [quizId], references: [id], onDelete: Cascade)
+  student    User  @relation("AttemptStudent", fields: [studentId], references: [id])
+  releasedBy User? @relation("AttemptReleasedBy", fields: [releasedById], references: [id])
+
+  @@index([quizId, studentId])
+  @@index([status])
+}
+
+// 7. assignments: one per course.
+model Assignment {
+  id           Int       @id @default(autoincrement())
+  courseId     Int       @unique
+  title        String
+  instructions String    @db.Text
+  // Two strings.
+  todoItems    Json
+  dueDate      DateTime?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  course      Course       @relation(fields: [courseId], references: [id], onDelete: Cascade)
+  submissions Submission[]
+}
+
+// 8. submissions: replacing the PDF while SUBMITTED updates filePath, fileName and submittedAt.
+model Submission {
+  id           Int              @id @default(autoincrement())
+  assignmentId Int
+  studentId    Int
+  filePath     String
+  fileName     String
+  // Two booleans: the to-do ticks.
+  checks       Json
+  status       SubmissionStatus @default(SUBMITTED)
+  // Whole number 0 to 100.
+  grade        Int?
+  feedback     String?          @db.Text
+  submittedAt  DateTime         @default(now())
+  gradedAt     DateTime?
+  createdAt    DateTime         @default(now())
+  updatedAt    DateTime         @updatedAt
+
+  assignment Assignment @relation(fields: [assignmentId], references: [id], onDelete: Cascade)
+  student    User       @relation(fields: [studentId], references: [id])
+
+  @@unique([assignmentId, studentId])
+}
+
+// 9. enrollments
+model Enrollment {
+  id        Int              @id @default(autoincrement())
+  courseId  Int
+  studentId Int
+  source    EnrollmentSource
+  createdAt DateTime         @default(now())
+
+  course  Course @relation(fields: [courseId], references: [id], onDelete: Cascade)
+  student User   @relation(fields: [studentId], references: [id])
+
+  @@unique([courseId, studentId])
+  @@index([studentId])
+}
+
+// 10. lesson_progress: reachedAt is set once, when 70% is first reached, and never taken back.
+//     The percent is worked out (watchedSeconds / duration), not stored.
+model LessonProgress {
+  id            Int       @id @default(autoincrement())
+  studentId     Int
+  lessonId      Int
+  watchedSeconds Int      @default(0)
+  lastReportAt  DateTime?
+  reachedAt     DateTime?
+  note          String?   @db.Text
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  student User   @relation(fields: [studentId], references: [id])
+  lesson  Lesson @relation(fields: [lessonId], references: [id], onDelete: Cascade)
+
+  @@unique([studentId, lessonId])
+}
+
+// 11. certificates: a snapshot taken when the first submission is saved. Never edited.
+model Certificate {
+  id            Int      @id @default(autoincrement())
+  courseId      Int
+  studentId     Int
+  certificateNo String   @unique
+  studentName   String
+  courseTitle   String
+  orgName       String
+  title         String
+  intro         String
+  mid           String
+  footer        String
+  logoPath      String?
+  issuedAt      DateTime @default(now())
+  createdAt     DateTime @default(now())
+
+  course  Course @relation(fields: [courseId], references: [id])
+  student User   @relation(fields: [studentId], references: [id])
+
+  @@unique([courseId, studentId])
+}
+
+// 12. password_reset_requests: the admin sees the open ones (resolvedAt is null).
+model PasswordResetRequest {
+  id           Int       @id @default(autoincrement())
+  userId       Int
+  resolvedAt   DateTime?
+  resolvedById Int?
+  createdAt    DateTime  @default(now())
+
+  user       User  @relation("ResetUser", fields: [userId], references: [id])
+  resolvedBy User? @relation("ResetResolvedBy", fields: [resolvedById], references: [id])
+
+  @@index([resolvedAt])
+}
+
+// 13. activity_logs: newest first.
+model ActivityLog {
+  id         Int          @id @default(autoincrement())
+  type       ActivityType
+  text       String       @db.Text
+  // Empty when no user did it (self-registration, sign-in page). v3.
+  actorId    Int?
+  actorLabel String
+  createdAt  DateTime     @default(now())
+
+  actor User? @relation(fields: [actorId], references: [id])
+
+  @@index([createdAt])
+  @@index([type])
+}
+
+// 14. settings: a single row (id 1). The quiz fields are defaults for NEW quizzes only.
+model Settings {
+  id                 Int      @id @default(1)
+  orgName            String
+  certTitle          String
+  certIntro          String
+  certMid            String
+  certFooter         String
+  logoPath           String?
+  quizQuestionCount  Int      @default(10)
+  quizPassMark       Int      @default(8)
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+}

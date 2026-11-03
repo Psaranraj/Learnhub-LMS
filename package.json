@@ -1,0 +1,23 @@
+{
+  "name": "@learnhub/source",
+  "version": "0.0.0",
+  "private": true,
+  "license": "MIT",
+  "scripts": {
+    "dev": "pnpm --parallel --filter @learnhub/api --filter @learnhub/web run serve",
+    "dev:api": "pnpm --filter @learnhub/api run serve",
+    "dev:web": "pnpm --filter @learnhub/web run serve",
+    "typecheck": "pnpm -r run typecheck",
+    "test": "pnpm --filter @learnhub/api run test",
+    "format": "prettier --write .",
+    "format:check": "prettier --check ."
+  },
+  "devDependencies": {
+    "@nx/js": "24.0.1",
+    "@nx/workspace": "24.0.1",
+    "nx": "24.0.1",
+    "prettier": "3.6.2",
+    "typescript": "~6.0.3"
+  },
+  "packageManager": "pnpm@12.14.0"
+}

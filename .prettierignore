@@ -1,0 +1,7 @@
+node_modules
+dist
+.nx
+pnpm-lock.yaml
+apps/api/storage
+apps/api/prisma/migrations
+*.pdf
